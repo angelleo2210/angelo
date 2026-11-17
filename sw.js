@@ -1,7 +1,7 @@
 // Service worker de Angelo: guarda la app y la IA para que abra rápido y funcione sin internet.
-const VERSION = 'angelo-v2';
+const VERSION = 'angelo-v3';
 const SHELL = [
-  './', './index.html', './styles.css', './manifest.webmanifest',
+  './', './index.html', './styles.css', './manifest.json',
   './js/app.js', './js/vision.js', './js/cutout.js', './js/tracker.js', './js/geometry.js',
   './vendor/mediapipe/vision_bundle.mjs',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png', './icons/favicon-32.png',
