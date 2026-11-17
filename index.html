@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Angelo — pon caras en tus videos</title>
+<meta name="description" content="Angelo: pega caras en cualquier video desde tu teléfono. Gratis y privado.">
+<meta name="theme-color" content="#0e0b16">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Angelo">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/favicon-32.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="top">
+  <div class="logo">Angelo<span class="spark">✦</span></div>
+  <div class="tag">Pon cualquier cara en cualquier video</div>
+</header>
+
+<main>
+  <p class="privacy">🔒 Tus videos y fotos <b>nunca salen de tu teléfono</b>. Todo se procesa aquí mismo.</p>
+
+  <!-- PASO 1 -->
+  <section class="card" id="step1">
+    <h2><span class="num">1</span> Elige tu video</h2>
+    <label class="bigbtn primary" for="videoInput">🎬 Subir video</label>
+    <input id="videoInput" type="file" accept="video/*" hidden>
+    <div id="videoInfo" class="info hidden"></div>
+    <label id="trimRow" class="check hidden"><input type="checkbox" id="trimChk" checked> Usar solo los primeros 30 segundos</label>
+  </section>
+
+  <!-- PASO 2 -->
+  <section class="card hidden" id="step2">
+    <h2><span class="num">2</span> Busca las caras</h2>
+    <button class="bigbtn primary" id="analyzeBtn">🔍 Buscar caras en el video</button>
+    <div id="anaProgress" class="progress hidden"><div class="bar"></div><span class="ptext">0%</span></div>
+    <div id="facesArea" class="hidden">
+      <p class="hint">Toca un recuadro (o una tarjeta) para elegir a quién le cambias la cara.</p>
+      <div class="canvaswrap"><canvas id="pickCanvas"></canvas></div>
+      <div id="faceCards" class="facecards"></div>
+    </div>
+  </section>
+
+  <!-- PASO 3 -->
+  <section class="card hidden" id="step3">
+    <h2><span class="num">3</span> Ajusta y mira cómo queda</h2>
+    <div class="canvaswrap"><canvas id="stage"></canvas></div>
+    <div class="playrow">
+      <button class="roundbtn" id="playBtn" aria-label="Reproducir">▶</button>
+      <input type="range" id="seek" min="0" max="1000" value="0" step="1">
+      <span id="timeLbl" class="time">0:00</span>
+    </div>
+    <div id="faceChips" class="chips"></div>
+    <div class="sliders" id="sliders">
+      <label>Tamaño <output id="o_scale"></output><input type="range" id="s_scale" min="0.5" max="2.5" step="0.01" value="1"></label>
+      <label>Mover ↔ <output id="o_dx"></output><input type="range" id="s_dx" min="-1" max="1" step="0.01" value="0"></label>
+      <label>Mover ↕ <output id="o_dy"></output><input type="range" id="s_dy" min="-1" max="1" step="0.01" value="0"></label>
+      <label>Girar <output id="o_rot"></output><input type="range" id="s_rot" min="-45" max="45" step="1" value="0"></label>
+      <label>Opacidad <output id="o_op"></output><input type="range" id="s_op" min="0.2" max="1" step="0.01" value="1"></label>
+      <label>Suavizado <output id="o_smooth"></output><input type="range" id="s_smooth" min="0" max="1" step="0.05" value="0.5"></label>
+      <div class="row2">
+        <label class="check"><input type="checkbox" id="c_flip"> Espejo</label>
+        <label class="check"><input type="checkbox" id="c_turn" checked> Seguir giro</label>
+        <button class="smallbtn" id="resetBtn">↺ Restablecer</button>
+      </div>
+      <p class="hint">Tip: arrastra la cara con el dedo sobre el video para moverla.</p>
+    </div>
+  </section>
+
+  <!-- PASO 4 -->
+  <section class="card hidden" id="step4">
+    <h2><span class="num">4</span> Crea tu video</h2>
+    <button class="bigbtn primary" id="exportBtn">✨ Crear video</button>
+    <div id="expProgress" class="progress hidden"><div class="bar"></div><span class="ptext">0%</span></div>
+    <p id="expNote" class="hint hidden">No cierres ni cambies de app mientras se crea el video. Se graba en tiempo real.</p>
+    <div id="result" class="hidden">
+      <video id="resultVideo" controls playsinline></video>
+      <div class="btnrow">
+        <button class="bigbtn" id="shareBtn">📤 Compartir / Guardar</button>
+        <a class="bigbtn" id="downloadBtn" download="angelo.mp4">⬇️ Descargar</a>
+      </div>
+      <p class="hint" id="saveHint">En iPhone: toca <b>Compartir</b> y luego <b>Guardar video</b> para que quede en tus Fotos.</p>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <p>Angelo · gratis, sin anuncios, sin cuentas.</p>
+    <p class="small">Para instalarla en tu iPhone: en Safari toca <b>Compartir</b> → <b>Agregar a pantalla de inicio</b>.</p>
+  </footer>
+</main>
+
+<video id="srcVideo" playsinline webkit-playsinline preload="auto"></video>
+<input id="photoInput" type="file" accept="image/*" hidden>
+<div id="toast" class="toast hidden"></div>
+<div id="busy" class="busy hidden"><div class="spinner"></div><div id="busyText">Cargando…</div></div>
+
+<script type="module" src="js/app.js"></script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
+</script>
+</body>
+</html>
