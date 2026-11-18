@@ -35,3 +35,11 @@ Instalar en iPhone: abre el enlace en Safari → Compartir → **Agregar a panta
 - Sin WebGL2 se usa la calcomanía como respaldo.
 
 Comparación: `screenshots/calidad-antes-despues.jpg`.
+
+## Modos (v6)
+
+- **Careta (recomendado, por defecto):** la cara de la foto recortada en óvalo con borde suave se coloca sobre el contorno de la cara del video (mismo centro, giro de los ojos, ancho y alto; nunca más grande que la cara). Solo canvas 2D, sin WebGL ni segmentación: funciona en cualquier iPhone.
+- **Natural (experimental):** malla deformada con WebGL2. Si falla (sin WebGL2, contexto perdido o dibujo vacío) cambia solo a Careta y avisa en pantalla.
+- **Cara + pelo (cabezón):** si el recorte de pelo falla, pega solo la cara y avisa.
+- Los errores se muestran en un aviso en pantalla, en vez de fallar en silencio.
+- El segmentador corre en CPU: en iPhone las máscaras hechas por GPU salen vacías (bug de MediaPipe con `getAsUint8Array`). Esa fue la causa de que v5 no dibujara nada en iPhone.

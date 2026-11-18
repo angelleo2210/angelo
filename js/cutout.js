@@ -46,7 +46,18 @@ function polyPath(g, pts) {
   g.closePath();
 }
 
-export async function makeCutout(file, mode = 'oval') {
+// Categorías de la máscara como enteros 0..5, de forma segura en iPhone.
+// Solo para pruebas: ?sim=nomask simula la máscara vacía que devuelve MediaPipe en algunos iPhone.
+const SIM_NOMASK = /[?&]sim=nomask/.test(location.search);
+function maskCats(cm) {
+  if (SIM_NOMASK) return new Uint8Array(cm.width * cm.height);
+  try { if (!cm.hasUint8Array || cm.hasUint8Array()) return cm.getAsUint8Array(); } catch (_) {}
+  const f = cm.getAsFloat32Array(), out = new Uint8Array(f.length);
+  for (let i = 0; i < f.length; i++) out[i] = Math.round(f[i] * 255);
+  return out;
+}
+
+export async function makeCutout(file, mode = 'careta') {
   const src = await loadImageCanvas(file, 1024);
   const W = src.width, H = src.height;
   const lm = await getLandmarker('IMAGE', 4);
@@ -76,11 +87,12 @@ export async function makeCutout(file, mode = 'oval') {
   });
 
   const mask = makeCanvas(W, H);
-  if (mode === 'hair') {
+  let hairOk = false;
+  if (mode === 'hair') try {
     const seg = await getSegmenter();
     const r = seg.segment(src);
     const cm = r.categoryMask;
-    const data = cm.getAsUint8Array();
+    const data = maskCats(cm);
     const mw = cm.width, mh = cm.height;
     const raw = makeCanvas(mw, mh);
     const rg = raw.getContext('2d');
@@ -99,15 +111,18 @@ export async function makeCutout(file, mode = 'oval') {
     rg.putImageData(id, 0, 0);
     try { cm.close(); } catch (_) {}
     try { r.close && r.close(); } catch (_) {}
+    // Si la IA devolvió una máscara vacía (pasa en algunos iPhone), no la usamos.
+    let on = 0; for (let i = 3; i < id.data.length; i += 4) if (id.data[i]) on++;
+    if (on < mw * mh * 0.01) throw new Error('EMPTYMASK');
+    hairOk = true;
     featherDraw(mask, feather * 0.6, (g) => {
       g.imageSmoothingEnabled = true;
       g.drawImage(raw, 0, 0, W, H);
       g.fillStyle = '#fff';
       polyPath(g, pts); g.fill();
     });
-  } else {
-    featherDraw(mask, feather, (g) => { g.fillStyle = '#fff'; polyPath(g, pts); g.fill(); });
-  }
+  } catch (e) { console.warn('[angelo] pelo no disponible, uso óvalo', e); }
+  if (!hairOk) featherDraw(mask, feather, (g) => { g.fillStyle = '#fff'; polyPath(g, pts); g.fill(); });
 
   // Recorta al rectángulo con contenido.
   const mg = mask.getContext('2d');
@@ -147,15 +162,22 @@ export async function makeCutout(file, mode = 'oval') {
   // Máscara de piel (IA): el pelo, el fondo y la ropa de la foto se vuelven transparentes
   // para que no tapen la cara del video. Va en el canal alfa de la textura.
   let skinMask = false;
-  try {
+  if (mode === 'natural') try {
     const seg = await getSegmenter();
     const r = seg.segment(src);
-    const cm = r.categoryMask, data = cm.getAsUint8Array(), mw = cm.width, mh = cm.height;
+    const cm = r.categoryMask, data = maskCats(cm), mw = cm.width, mh = cm.height;
     const raw = makeCanvas(mw, mh), rg = raw.getContext('2d'), id = rg.createImageData(mw, mh);
     for (let i = 0; i < mw * mh; i++) { const c = data[i]; id.data[i * 4 + 3] = (c === 2 || c === 3 || c === 5) ? 255 : 0; }
     rg.putImageData(id, 0, 0);
     try { cm.close(); } catch (_) {}
     try { r.close && r.close(); } catch (_) {}
+    // Valida la máscara: alrededor de la nariz debe haber piel. Si no, se ignora (evita una cara invisible).
+    const nx = Math.round(L[4].x * mw), ny = Math.round(L[4].y * mh), rr = Math.max(2, Math.round(m.fw / W * mw * 0.18));
+    let on = 0, tot = 0;
+    for (let y = ny - rr; y <= ny + rr; y++) for (let x = nx - rr; x <= nx + rr; x++) {
+      if (x < 0 || y < 0 || x >= mw || y >= mh) continue; tot++; if (id.data[(y * mw + x) * 4 + 3]) on++;
+    }
+    if (!tot || on / tot < 0.5) throw new Error('BADMASK ' + on + '/' + tot);
     const mk = makeCanvas(tex.width, tex.height);
     featherDraw(mk, Math.max(1.5, tex.width / 160), (g) => { g.imageSmoothingEnabled = true; g.drawImage(raw, tx0 * mw / W, ty0 * mh / H, tw * mw / W, th * mh / H, 0, 0, tex.width, tex.height); });
     tg.globalCompositeOperation = 'destination-in';
@@ -179,5 +201,5 @@ export async function makeCutout(file, mode = 'oval') {
   const srcPts = new Float32Array(NPTS * 2);
   for (let i = 0; i < NPTS; i++) { srcPts[2 * i] = mp[2 * i] - bx0; srcPts[2 * i + 1] = mp[2 * i + 1] - by0; }
   return { id: ++CUT_ID, canvas: out, ax: m.cx - bx0, ay: m.cy - by0, faceH: m.fh, faceW: m.fw, roll: m.roll,
-    tex, uv, stats, fore, srcPts, mode, skinMask };
+    tex, uv, stats, fore, srcPts, mode, skinMask, hairOk };
 }

@@ -1,7 +1,7 @@
 import { makeCutout, makeCanvas } from './cutout.js';
 import { analyzeVideo, buildPath, poseAt, FACE_UNIT } from './tracker.js';
 import { getLandmarker } from './vision.js';
-import { compose, SIM } from './geometry.js';
+import { compose, SIM, OVAL } from './geometry.js';
 import { FaceGL } from './glface.js';
 
 const $ = (id) => document.getElementById(id);
@@ -18,6 +18,7 @@ const S = {
   resultUrl: null, resultFile: null,
 };
 window.__angelo = S; // para pruebas
+S.drawDbg = { careta: 0, gl: 0, sticker: 0, skipped: 0, fallback: 0 };
 
 // ---------- utilidades de interfaz ----------
 let toastTimer;
@@ -25,6 +26,18 @@ function toast(msg, ms = 3800) {
   const t = $('toast'); t.textContent = msg; t.classList.remove('hidden');
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.add('hidden'), ms);
 }
+// Cualquier error se muestra en pantalla (en vez de fallar en silencio).
+let lastErrAt = 0;
+function showError(where, e) {
+  const msg = (e && (e.message || e.reason || e)) + '';
+  console.error('[angelo]', where, e);
+  if (Date.now() - lastErrAt < 4000) return;
+  lastErrAt = Date.now();
+  toast('⚠️ ' + where + ': ' + msg.slice(0, 140), 6000);
+}
+window.addEventListener('error', (ev) => showError('Error', ev.error || ev.message));
+window.addEventListener('unhandledrejection', (ev) => showError('Error', ev.reason));
+S.showError = showError;
 function busy(on, text = 'Cargando…') { $('busyText').textContent = text; $('busy').classList.toggle('hidden', !on); }
 function show(id, on = true) { $(id).classList.toggle('hidden', !on); }
 function setProgress(id, p) {
@@ -124,7 +137,7 @@ $('analyzeBtn').addEventListener('click', async () => {
     toast('No encontré caras en el video. Prueba con uno donde las caras se vean claras y de frente.', 6000);
     return;
   }
-  S.faces = S.tracks.map((tr, i) => ({ track: tr, num: tr.num, enabled: i === 0, cutout: null, file: null, mode: 'oval', adj: defaultAdj() }));
+  S.faces = S.tracks.map((tr, i) => ({ track: tr, num: tr.num, enabled: i === 0, cutout: null, file: null, mode: 'careta', adj: defaultAdj() }));
   S.faces.forEach((f) => buildPath(f.track, f.adj.smooth));
   S.sel = 0;
   show('facesArea');
@@ -220,9 +233,9 @@ function renderCards() {
     ph.textContent = f.cutout ? '📷 Cambiar foto' : '📷 Elegir foto';
     ph.onclick = () => { S.photoTarget = f; $('photoInput').click(); };
     const sel = document.createElement('select');
-    sel.innerHTML = '<option value="oval">Cara (natural)</option><option value="hair">Cara + pelo (cabezón)</option>';
+    sel.innerHTML = '<option value="careta">Careta (recomendado)</option><option value="natural">Natural (experimental)</option><option value="hair">Cara + pelo (cabezón)</option>';
     sel.value = f.mode;
-    sel.onchange = async () => { f.mode = sel.value; if (f.file) await applyPhoto(f, f.file); };
+    sel.onchange = async () => { f.mode = sel.value; f.glBad = false; if (f.file) await applyPhoto(f, f.file); };
     acts.append(tg, ph, sel);
     body.appendChild(acts);
     card.append(thumbs, body);
@@ -241,7 +254,14 @@ $('photoInput').addEventListener('change', async (e) => {
 async function applyPhoto(f, file) {
   busy(true, f.mode === 'hair' ? 'Recortando cara y pelo…' : 'Recortando la cara…');
   try {
-    f.cutout = await makeCutout(file, f.mode);
+    try { f.cutout = await makeCutout(file, f.mode); }
+    catch (err) {
+      if (f.mode === 'careta' || err.message === 'NOFACE' || err.message === 'BADIMAGE') throw err;
+      console.warn('[angelo] modo', f.mode, 'falló, uso careta', err);
+      f.mode = 'careta'; f.cutout = await makeCutout(file, 'careta');
+      toast('Ese modo no funcionó en este teléfono. Uso “Careta”.', 5000);
+    }
+    if (f.mode === 'hair' && !f.cutout.hairOk) toast('No pude recortar el pelo en este teléfono; se pega solo la cara.', 5000);
     f.file = file; f.enabled = true;
     S.sel = S.faces.indexOf(f);
   } catch (err) {
@@ -282,6 +302,7 @@ function refreshEditor() {
   }
   for (const k in sliders) $(sliders[k]).value = cur.adj[k];
   $('c_color').checked = cur.adj.color; $('c_fore').checked = cur.adj.fore;
+  show('natOnly', cur.mode === 'natural');
   updateOutputs();
   drawStage();
 }
@@ -370,22 +391,80 @@ function drawSticker(ctx, f, pts, alpha) {
   ctx.drawImage(c.canvas, 0, 0);
   ctx.restore();
 }
+// Ángulo de los ojos y caja del contorno de la cara en el marco girado por ese ángulo.
+function ovalFrame(P) {
+  const lx = (P[66] + P[266]) / 2, ly = (P[67] + P[267]) / 2;     // ojo 33/133
+  const rx = (P[724] + P[526]) / 2, ry = (P[725] + P[527]) / 2;   // ojo 362/263
+  const r = Math.atan2(ry - ly, rx - lx), co = Math.cos(r), si = Math.sin(r);
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const i of OVAL) {
+    const x = P[2 * i], y = P[2 * i + 1];
+    const u = x * co + y * si, v = -x * si + y * co;
+    if (u < x0) x0 = u; if (u > x1) x1 = u; if (v < y0) y0 = v; if (v > y1) y1 = v;
+  }
+  const cu = (x0 + x1) / 2, cv = (y0 + y1) / 2;
+  return { r, w: x1 - x0, h: y1 - y0, cx: cu * co - cv * si, cy: cu * si + cv * co };
+}
+// CARETA (modo por defecto): la cara recortada en óvalo se coloca EXACTAMENTE sobre el contorno de la
+// cara del video: mismo centro, mismo giro de ojos, mismo ancho y alto (nunca más grande que la cara).
+// Solo canvas 2D, sin WebGL: funciona en cualquier iPhone.
+function drawCareta(ctx, f, pts, alpha) {
+  const c = f.cutout;
+  if (!c.srcFrame) c.srcFrame = ovalFrame(c.srcPts);
+  const s = c.srcFrame, t = ovalFrame(pts);
+  let sx = t.w / s.w, sy = t.h / s.h;
+  // Cabeza muy inclinada: se aplasta un poco la careta, pero sin deformarla demasiado (solo se encoge).
+  if (sy < sx * 0.6) sx = sy / 0.6; else if (sx < sy * 0.6) sy = sx / 0.6;
+  if (!(sx > 0 && sy > 0 && isFinite(sx) && isFinite(sy))) return false;
+  ctx.save();
+  ctx.globalAlpha = f.adj.opacity * alpha;
+  ctx.translate(t.cx, t.cy); ctx.rotate(t.r); ctx.scale(sx, sy); ctx.rotate(-s.r); ctx.translate(-s.cx, -s.cy);
+  ctx.drawImage(c.canvas, 0, 0);
+  ctx.restore();
+  return true;
+}
+let glWarned = false;
+function glFallback(f, why) {
+  f.glBad = true; S.drawDbg.fallback++;
+  console.warn('[angelo] modo Natural falló:', why);
+  if (!glWarned) { glWarned = true; toast('El modo “Natural” no funciona en este teléfono (' + why + '). Uso “Careta”.', 6000); }
+}
 function renderFrame(ctx, W, H, t) {
   ctx.drawImage(video, 0, 0, W, H);
-  const items = [], stickers = [];
+  const items = [], caretas = [], stickers = [];
   for (const f of activeFaces()) {
     const p = poseAt(f.track, t);
-    if (!p || p.alpha <= 0 || !p.sim || !p.L) continue;
+    if (!p || p.alpha <= 0) continue;
+    if (!p.sim || !p.L) { S.drawDbg.skipped++; continue; }
     const pts = targetPoints(p, f, W, H);
-    if (f.cutout.mode === 'hair' || !getGL()) stickers.push([f, pts, p.alpha]);
-    else items.push({ cut: f.cutout, pts, opacity: f.adj.opacity * p.alpha, feather: f.adj.feather,
-      fore: f.adj.fore ? 1 : 0, color: f.adj.color ? 0.9 : 0, tgtStats: p.col, bias: 0.4 });
+    const m = f.cutout.mode;
+    if (m === 'hair') stickers.push([f, pts, p.alpha]);
+    else if (m === 'natural' && !f.glBad && f.cutout.tex) {
+      if (!getGL()) { glFallback(f, 'sin WebGL2'); caretas.push([f, pts, p.alpha]); }
+      else items.push({ f, cut: f.cutout, pts, alpha: p.alpha, opacity: f.adj.opacity * p.alpha, feather: f.adj.feather,
+        fore: f.adj.fore ? 1 : 0, color: f.adj.color ? 0.9 : 0, tgtStats: p.col, bias: 0.4 });
+    } else caretas.push([f, pts, p.alpha]);
   }
   if (items.length) {
-    try { ctx.drawImage(faceGL.render(W, H, items), 0, 0); }
-    catch (e) { console.warn(e); glFailed = true; faceGL = null; }
+    try {
+      if (faceGL.lost()) throw new Error('contexto WebGL perdido');
+      const cv = faceGL.render(W, H, items);
+      // Comprobación: la nariz debe quedar dibujada. Si sale invisible, se usa la careta.
+      for (const it of items) {
+        const a = faceGL.probe(it.pts[8], it.pts[9]);
+        if (it.opacity > 0.3 && a < 8) { it.f.glMiss = (it.f.glMiss || 0) + 1; if (it.f.glMiss >= 3) glFallback(it.f, a < 0 ? 'contexto perdido' : 'dibujo vacío'); }
+        else it.f.glMiss = 0;
+      }
+      ctx.drawImage(cv, 0, 0);
+      S.drawDbg.gl += items.length;
+    } catch (e) {
+      for (const it of items) glFallback(it.f, e.message || 'error');
+      glFailed = true; faceGL = null;
+    }
+    for (const it of items) if (it.f.glBad || it.f.glMiss) caretas.push([it.f, it.pts, it.alpha]);
   }
-  for (const [f, pts, al] of stickers) drawSticker(ctx, f, pts, al);
+  for (const [f, pts, al] of caretas) { if (drawCareta(ctx, f, pts, al)) S.drawDbg.careta++; else S.drawDbg.skipped++; }
+  for (const [f, pts, al] of stickers) { drawSticker(ctx, f, pts, al); S.drawDbg.sticker++; }
 }
 let frameT = 0; // tiempo del último cuadro presentado (mediaTime)
 function drawStage(t) {
@@ -460,6 +539,10 @@ function pickMime() {
 $('exportBtn').addEventListener('click', exportVideo);
 async function exportVideo() {
   if (S.exporting || !activeFaces().length) return;
+  if (!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream) {
+    toast('Este navegador no puede grabar el video. Actualiza iOS (14.3 o más nuevo) o usa Safari/Chrome.', 7000);
+    return;
+  }
   const mime = pickMime();
   if (mime === null || !stage.captureStream) { toast('Este navegador no puede grabar video. Usa Safari actualizado en iPhone.', 6000); return; }
   stopPreview();

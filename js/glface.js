@@ -57,6 +57,9 @@ void main() {
   outColor = vec4(c * a, a);
 }`;
 
+// Solo para pruebas: ?sim=blankgl simula un iPhone donde WebGL no dibuja nada.
+const SIM_BLANK = /[?&]sim=blankgl/.test(location.search);
+
 export class FaceGL {
   constructor() {
     this.canvas = document.createElement('canvas');
@@ -133,8 +136,18 @@ export class FaceGL {
         gl.uniform3f(this.loc.uMS, s[0], s[1], s[2]); gl.uniform3f(this.loc.uSS, s[3], s[4], s[5]);
         gl.uniform3f(this.loc.uMT, t[0], t[1], t[2]); gl.uniform3f(this.loc.uST, t[3], t[4], t[5]);
       }
-      gl.drawElements(gl.TRIANGLES, this.nIdx, gl.UNSIGNED_SHORT, 0);
+      if (!SIM_BLANK) gl.drawElements(gl.TRIANGLES, this.nIdx, gl.UNSIGNED_SHORT, 0);
     }
     return this.canvas;
   }
+  // Lee el alfa dibujado en un punto (x,y en px de la imagen). Sirve para detectar
+  // un dibujo invisible (contexto perdido, textura vacía, etc.).
+  probe(x, y) {
+    const gl = this.gl;
+    if (gl.isContextLost()) return -1;
+    const px = new Uint8Array(4);
+    gl.readPixels(Math.round(x), Math.round(this.canvas.height - 1 - y), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return px[3];
+  }
+  lost() { return this.gl.isContextLost(); }
 }

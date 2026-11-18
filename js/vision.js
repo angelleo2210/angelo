@@ -52,12 +52,14 @@ export async function getSegmenter() {
   if (!cache.seg) {
     cache.seg = (async () => {
       const fs = await fileset();
-      return withDelegate((delegate) => ImageSegmenter.createFromOptions(fs, {
-        baseOptions: { modelAssetPath: BASE + 'models/selfie_multiclass_256x256.tflite', delegate },
+      // Siempre CPU: en iPhone las máscaras hechas con GPU salen vacías o con categorías erróneas
+      // (bug de MediaPipe con getAsUint8Array en Safari). Es una sola foto, en CPU es rápido.
+      return ImageSegmenter.createFromOptions(fs, {
+        baseOptions: { modelAssetPath: BASE + 'models/selfie_multiclass_256x256.tflite', delegate: 'CPU' },
         runningMode: 'IMAGE',
         outputCategoryMask: true,
         outputConfidenceMasks: false,
-      }));
+      });
     })();
     cache.seg.catch(() => { delete cache.seg; });
   }
