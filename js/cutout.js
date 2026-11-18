@@ -56,8 +56,11 @@ export async function makeCutout(file, mode = 'oval') {
     if (!best || m.fh > best.m.fh) best = { L, m };
   }
   const { L, m } = best;
-  const feather = Math.max(2, m.fh * 0.06);
-  const c = { x: m.cx, y: m.cy };
+  // Alto completo de la cara (frente→barbilla) solo para el recorte.
+  const tx = L[10].x * W, ty = L[10].y * H, bx = L[152].x * W, by = L[152].y * H;
+  const FH = Math.hypot(bx - tx, by - ty);
+  const feather = Math.max(2, FH * 0.06);
+  const c = { x: (tx + bx) / 2, y: (ty + by) / 2 };
   // Óvalo de la cara, un poco más grande y con más frente.
   let pts = OVAL.map((i) => ({ x: L[i].x * W, y: L[i].y * H }));
   pts = pts.map((p) => {
@@ -81,9 +84,9 @@ export async function makeCutout(file, mode = 'oval') {
     const rg = raw.getContext('2d');
     const id = rg.createImageData(mw, mh);
     const sx = mw / W, sy = mh / H;
-    const chinY = (L[152].y * H + m.fh * 0.02) * sy;
+    const chinY = (L[152].y * H + FH * 0.02) * sy;
     const x0 = (m.cx - m.fw * 1.1) * sx, x1 = (m.cx + m.fw * 1.1) * sx;
-    const yTop = (m.cy - m.fh * 1.4) * sy;
+    const yTop = (c.y - FH * 1.4) * sy;
     for (let y = 0; y < mh; y++) {
       for (let x = 0; x < mw; x++) {
         const i = y * mw + x;

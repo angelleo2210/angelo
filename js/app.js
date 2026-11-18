@@ -1,5 +1,5 @@
 import { makeCutout, makeCanvas } from './cutout.js';
-import { analyzeVideo, buildPath, poseAt } from './tracker.js';
+import { analyzeVideo, buildPath, poseAt, FACE_UNIT } from './tracker.js';
 import { getLandmarker } from './vision.js';
 
 const $ = (id) => document.getElementById(id);
@@ -30,7 +30,7 @@ function setProgress(id, p) {
   el.querySelector('.ptext').textContent = Math.round(p * 100) + '%';
 }
 const fmt = (t) => { t = Math.max(0, t); const m = Math.floor(t / 60), s = Math.floor(t % 60); return m + ':' + String(s).padStart(2, '0'); };
-const defaultAdj = () => ({ scale: 1, dx: 0, dy: 0, rot: 0, opacity: 1, flip: false, turn: true, smooth: 0.5 });
+const defaultAdj = () => ({ scale: 1, dx: 0, dy: 0, rot: 0, opacity: 1, flip: false, turn: true, smooth: 0.2 });
 
 // ---------- Paso 1: video ----------
 $('videoInput').addEventListener('change', async (e) => {
@@ -134,8 +134,8 @@ $('analyzeBtn').addEventListener('click', async () => {
 function faceRect(f, t, W, H) {
   const p = poseAt(f.track, t);
   if (!p) return null;
-  const h = p.h * H * 1.35, w = Math.max(p.w * H * 1.15, h * 0.75);
-  return { x: p.cx * W - w / 2, y: p.cy * H - h / 2, w, h };
+  const h = p.h * H * FACE_UNIT * 1.35, w = Math.max(p.w * H * 1.15, h * 0.75);
+  return { x: p.cx * W - w / 2, y: p.cy * H - h * 0.42, w, h };
 }
 
 async function seek(t) {
@@ -312,13 +312,14 @@ stage.addEventListener('pointerdown', (ev) => {
   let best = null, bd = Infinity;
   activeFaces().forEach((f) => {
     const pose = poseAt(f.track, t); if (!pose) return;
-    const cx = pose.cx * S.W + f.adj.dx * pose.h * S.H, cy = pose.cy * S.H + f.adj.dy * pose.h * S.H;
-    const d = Math.hypot(p.x - cx, p.y - cy) / (pose.h * S.H);
+    const u = pose.h * S.H * FACE_UNIT;
+    const cx = pose.cx * S.W + f.adj.dx * u, cy = pose.cy * S.H + f.adj.dy * u;
+    const d = Math.hypot(p.x - cx, p.y - cy) / u;
     if (d < bd) { bd = d; best = { f, pose }; }
   });
   if (!best || bd > 1.5) return;
   if (S.faces[S.sel] !== best.f) { S.sel = S.faces.indexOf(best.f); refreshEditor(); }
-  drag = { f: best.f, h: best.pose.h * S.H, x: p.x, y: p.y, dx: best.f.adj.dx, dy: best.f.adj.dy };
+  drag = { f: best.f, h: best.pose.h * S.H * FACE_UNIT, x: p.x, y: p.y, dx: best.f.adj.dx, dy: best.f.adj.dy };
   stage.setPointerCapture(ev.pointerId);
 });
 stage.addEventListener('pointermove', (ev) => {
@@ -333,15 +334,15 @@ stage.addEventListener('pointermove', (ev) => {
 const endDrag = () => { drag = null; };
 stage.addEventListener('pointerup', endDrag); stage.addEventListener('pointercancel', endDrag);
 
-// Dibuja un cuadro: video + caras pegadas.
+// Dibuja un cuadro: video + caras pegadas. "t" es el tiempo EXACTO del cuadro dibujado.
 function renderFrame(ctx, W, H, t) {
   ctx.drawImage(video, 0, 0, W, H);
   for (const f of activeFaces()) {
     const p = poseAt(f.track, t);
     if (!p || p.alpha <= 0) continue;
     const c = f.cutout, a = f.adj;
-    const faceH = p.h * H;
-    const sc = (faceH / c.faceH) * a.scale;
+    const unit = p.h * H; // frente→nariz en píxeles
+    const sc = (unit / c.faceH) * a.scale;
     let sx = 1;
     if (a.turn) { // simula el giro de la cabeza estrechando la cara
       const ratioT = p.w / p.h, ratioC = c.faceW / c.faceH;
@@ -349,31 +350,41 @@ function renderFrame(ctx, W, H, t) {
     }
     ctx.save();
     ctx.globalAlpha = a.opacity * p.alpha;
-    ctx.translate(p.cx * W + a.dx * faceH, p.cy * H + a.dy * faceH);
+    ctx.translate(p.cx * W + a.dx * unit * FACE_UNIT, p.cy * H + a.dy * unit * FACE_UNIT);
     ctx.rotate(p.roll - (a.flip ? -c.roll : c.roll) + (a.rot * Math.PI) / 180);
     ctx.scale(sc * sx * (a.flip ? -1 : 1), sc);
     ctx.drawImage(c.canvas, -c.ax, -c.ay);
     ctx.restore();
   }
 }
-function drawStage() {
+let frameT = 0; // tiempo del último cuadro presentado (mediaTime)
+function drawStage(t) {
   if (!S.W) return;
-  renderFrame(sctx, S.W, S.H, video.currentTime);
+  if (t == null) t = video.paused ? video.currentTime : frameT;
+  renderFrame(sctx, S.W, S.H, t);
   if (!S.exporting) {
-    $('seek').value = Math.round((video.currentTime / (S.end || 1)) * 1000);
-    $('timeLbl').textContent = fmt(video.currentTime);
+    $('seek').value = Math.round((t / (S.end || 1)) * 1000);
+    $('timeLbl').textContent = fmt(t);
   }
 }
 
-// Reproducción de vista previa.
-let raf = 0;
-function loop() {
-  drawStage();
-  if (!S.exporting && video.currentTime >= S.end - 0.02) { video.pause(); }
-  if (!video.paused) raf = requestAnimationFrame(loop); else { raf = 0; setPlayIcon(); drawStage(); }
+// Reproducción de vista previa: dibuja en cada cuadro NUEVO del video con su tiempo exacto.
+let raf = 0, vfcId = 0;
+const HAS_VFC = 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
+function onPreviewFrame(now, md) {
+  vfcId = 0;
+  frameT = md ? md.mediaTime : video.currentTime;
+  drawStage(frameT);
+  if (!S.exporting && frameT >= S.end - 0.02) { video.pause(); }
+  if (!video.paused) schedulePreview(); else { setPlayIcon(); }
 }
+function schedulePreview() {
+  if (HAS_VFC) vfcId = video.requestVideoFrameCallback(onPreviewFrame);
+  else raf = requestAnimationFrame(() => onPreviewFrame(0, null));
+}
+function loop() { schedulePreview(); }
 function setPlayIcon() { $('playBtn').textContent = video.paused ? '▶' : '❚❚'; }
-function stopPreview() { if (!video.paused) video.pause(); cancelAnimationFrame(raf); raf = 0; setPlayIcon(); }
+function stopPreview() { if (!video.paused) video.pause(); cancelAnimationFrame(raf); raf = 0; if (vfcId && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(vfcId); vfcId = 0; setPlayIcon(); }
 
 let audio = null;
 function ensureAudio() {
@@ -397,7 +408,7 @@ $('playBtn').addEventListener('click', async () => {
     video.muted = false;
     if (video.currentTime >= S.end - 0.05) await seek(0);
     try { await video.play(); } catch (e) { video.muted = true; await video.play().catch(() => {}); }
-    setPlayIcon(); cancelAnimationFrame(raf); raf = requestAnimationFrame(loop);
+    setPlayIcon(); cancelAnimationFrame(raf); if (vfcId && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(vfcId); loop();
   } else { stopPreview(); drawStage(); }
 });
 $('seek').addEventListener('input', async (e) => {
@@ -439,9 +450,9 @@ async function exportVideo() {
   try { await video.play(); } catch (e) { video.muted = true; await video.play().catch(() => {}); }
   await new Promise((resolve) => {
     const useVFC = 'requestVideoFrameCallback' in video;
-    const tick = () => {
+    const tick = (now, md) => {
       startRec();
-      const t = video.currentTime;
+      const t = md ? md.mediaTime : video.currentTime;
       renderFrame(sctx, S.W, S.H, t);
       setProgress('expProgress', Math.min(1, t / S.end));
       if (t >= S.end - 0.02 || video.ended) { resolve(); return; }
@@ -451,7 +462,6 @@ async function exportVideo() {
     if (useVFC) video.requestVideoFrameCallback(tick); else requestAnimationFrame(tick);
   });
   video.pause();
-  renderFrame(sctx, S.W, S.H, video.currentTime);
   await new Promise((r) => setTimeout(r, 120));
   startRec();
   rec.stop();

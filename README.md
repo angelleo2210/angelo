@@ -14,7 +14,11 @@ Pon cualquier cara en cualquier video, desde el teléfono. Gratis, sin anuncios 
   - `blaze_face_full_range.tflite` – detecta caras grandes y pequeñas en cada cuadro.
   - `face_landmarker.task` – 478 puntos de la cara (en un recorte ampliado de cada cara) para posición, tamaño, giro e inclinación.
   - `selfie_multiclass_256x256.tflite` – recorte opcional "cara + pelo".
-- Seguimiento por cercanía entre cuadros, suavizado gaussiano centrado, la cara se mantiene ~0.45 s si se pierde la detección.
+- Análisis **cuadro por cuadro** (todos los cuadros en videos de 24/25/30 fps); cada pose se guarda con el tiempo exacto del cuadro (`requestVideoFrameCallback` → `mediaTime`).
+- La vista previa y la exportación dibujan la cara con la pose de **ese mismo cuadro** (sin retraso).
+- Ancla en puntos rígidos (ojos, nariz, frente), así la cara no "flota" cuando la persona habla.
+- Suavizado adaptativo centrado: quita temblor cuando la cabeza está quieta y casi no suaviza cuando se mueve rápido.
+- Si se pierde la cara, sigue su velocidad 0.12 s y luego la mantiene y la desvanece; huecos cortos (mano tapando la cara) se rellenan.
 - Exportación con `canvas.captureStream()` + `MediaRecorder` (prefiere `video/mp4`), audio original vía WebAudio.
 - PWA instalable (manifest + service worker).
 
