@@ -1,6 +1,8 @@
 // Recorta la cara de una foto con bordes suaves (óvalo) o con pelo (segmentación IA).
 import { getLandmarker, getSegmenter } from './vision.js';
-import { OVAL, faceMetrics } from './geometry.js';
+import { OVAL, faceMetrics, NPTS, skinStats } from './geometry.js';
+
+let CUT_ID = 0;
 
 export function makeCanvas(w, h) {
   const c = document.createElement('canvas');
@@ -127,5 +129,55 @@ export async function makeCutout(file, mode = 'oval') {
   og.globalCompositeOperation = 'destination-in';
   og.drawImage(mask, bx0, by0, cw, ch, 0, 0, cw, ch);
   og.globalCompositeOperation = 'source-over';
-  return { canvas: out, ax: m.cx - bx0, ay: m.cy - by0, faceH: m.fh, faceW: m.fw, roll: m.roll };
+  // ---- Datos para pegar con la malla (modo "cara") ----
+  const mp = new Float32Array(NPTS * 2);
+  let mx0 = Infinity, my0 = Infinity, mx1 = -Infinity, my1 = -Infinity;
+  for (let i = 0; i < NPTS; i++) {
+    const x = L[i].x * W, y = L[i].y * H; mp[2 * i] = x; mp[2 * i + 1] = y;
+    if (x < mx0) mx0 = x; if (x > mx1) mx1 = x; if (y < my0) my0 = y; if (y > my1) my1 = y;
+  }
+  const padX = (mx1 - mx0) * 0.08, padY = (my1 - my0) * 0.08;
+  const tx0 = Math.max(0, Math.floor(mx0 - padX)), ty0 = Math.max(0, Math.floor(my0 - padY));
+  const tx1 = Math.min(W, Math.ceil(mx1 + padX)), ty1 = Math.min(H, Math.ceil(my1 + padY));
+  const tw = tx1 - tx0, th = ty1 - ty0;
+  const ts = Math.min(1, 768 / Math.max(tw, th));
+  const tex = makeCanvas(tw * ts, th * ts);
+  const tg = tex.getContext('2d');
+  tg.drawImage(src, tx0, ty0, tw, th, 0, 0, tex.width, tex.height);
+  // Máscara de piel (IA): el pelo, el fondo y la ropa de la foto se vuelven transparentes
+  // para que no tapen la cara del video. Va en el canal alfa de la textura.
+  let skinMask = false;
+  try {
+    const seg = await getSegmenter();
+    const r = seg.segment(src);
+    const cm = r.categoryMask, data = cm.getAsUint8Array(), mw = cm.width, mh = cm.height;
+    const raw = makeCanvas(mw, mh), rg = raw.getContext('2d'), id = rg.createImageData(mw, mh);
+    for (let i = 0; i < mw * mh; i++) { const c = data[i]; id.data[i * 4 + 3] = (c === 2 || c === 3 || c === 5) ? 255 : 0; }
+    rg.putImageData(id, 0, 0);
+    try { cm.close(); } catch (_) {}
+    try { r.close && r.close(); } catch (_) {}
+    const mk = makeCanvas(tex.width, tex.height);
+    featherDraw(mk, Math.max(1.5, tex.width / 160), (g) => { g.imageSmoothingEnabled = true; g.drawImage(raw, tx0 * mw / W, ty0 * mh / H, tw * mw / W, th * mh / H, 0, 0, tex.width, tex.height); });
+    tg.globalCompositeOperation = 'destination-in';
+    tg.drawImage(mk, 0, 0);
+    tg.globalCompositeOperation = 'source-over';
+    skinMask = true;
+  } catch (e) { console.warn('[angelo] sin máscara de piel', e); }
+  const uv = new Float32Array(NPTS * 2);
+  for (let i = 0; i < NPTS; i++) { uv[2 * i] = (mp[2 * i] - tx0) / tw; uv[2 * i + 1] = (mp[2 * i + 1] - ty0) / th; }
+  const img = src.getContext('2d').getImageData(0, 0, W, H);
+  const stats = skinStats(img.data, W, H, mp, 2);
+  // La frente de arriba se desvanece hacia la frente real (oculta pelo/entradas de la foto).
+  const brow = [105, 66, 107, 334, 296, 336].reduce((a, i) => a + mp[2 * i + 1], 0) / 6;
+  const top = mp[2 * 10 + 1];
+  const fore = new Float32Array(NPTS);
+  for (let i = 0; i < NPTS; i++) {
+    const f = Math.max(0, Math.min(1, (brow - mp[2 * i + 1]) / Math.max(1, brow - top)));
+    const t = Math.max(0, Math.min(1, (f - 0.2) / 0.75));
+    fore[i] = 1 - t * t * (3 - 2 * t);
+  }
+  const srcPts = new Float32Array(NPTS * 2);
+  for (let i = 0; i < NPTS; i++) { srcPts[2 * i] = mp[2 * i] - bx0; srcPts[2 * i + 1] = mp[2 * i + 1] - by0; }
+  return { id: ++CUT_ID, canvas: out, ax: m.cx - bx0, ay: m.cy - by0, faceH: m.fh, faceW: m.fw, roll: m.roll,
+    tex, uv, stats, fore, srcPts, mode, skinMask };
 }

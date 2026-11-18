@@ -1,5 +1,5 @@
 // Service worker de Angelo: guarda la app y la IA para que abra rápido y funcione sin internet.
-const VERSION = 'angelo-v4';
+const VERSION = 'angelo-v5';
 const SHELL = [
   './', './index.html', './styles.css', './manifest.json',
   './js/app.js', './js/vision.js', './js/cutout.js', './js/tracker.js', './js/geometry.js',

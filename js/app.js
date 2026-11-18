@@ -1,6 +1,8 @@
 import { makeCutout, makeCanvas } from './cutout.js';
 import { analyzeVideo, buildPath, poseAt, FACE_UNIT } from './tracker.js';
 import { getLandmarker } from './vision.js';
+import { compose, SIM } from './geometry.js';
+import { FaceGL } from './glface.js';
 
 const $ = (id) => document.getElementById(id);
 const video = $('srcVideo');
@@ -30,7 +32,7 @@ function setProgress(id, p) {
   el.querySelector('.ptext').textContent = Math.round(p * 100) + '%';
 }
 const fmt = (t) => { t = Math.max(0, t); const m = Math.floor(t / 60), s = Math.floor(t % 60); return m + ':' + String(s).padStart(2, '0'); };
-const defaultAdj = () => ({ scale: 1, dx: 0, dy: 0, rot: 0, opacity: 1, flip: false, turn: true, smooth: 0.2 });
+const defaultAdj = () => ({ scale: 1, dx: 0, dy: 0, rot: 0, opacity: 1, color: true, fore: true, feather: 0.7, smooth: 0.2 });
 
 // ---------- Paso 1: video ----------
 $('videoInput').addEventListener('change', async (e) => {
@@ -135,7 +137,7 @@ function faceRect(f, t, W, H) {
   const p = poseAt(f.track, t);
   if (!p) return null;
   const h = p.h * H * FACE_UNIT * 1.35, w = Math.max(p.w * H * 1.15, h * 0.75);
-  return { x: p.cx * W - w / 2, y: p.cy * H - h * 0.42, w, h };
+  return { x: p.cx * W - w / 2, y: p.cy * H - h * 0.55, w, h };
 }
 
 async function seek(t) {
@@ -218,7 +220,7 @@ function renderCards() {
     ph.textContent = f.cutout ? '📷 Cambiar foto' : '📷 Elegir foto';
     ph.onclick = () => { S.photoTarget = f; $('photoInput').click(); };
     const sel = document.createElement('select');
-    sel.innerHTML = '<option value="oval">Solo cara (óvalo)</option><option value="hair">Cara + pelo (IA)</option>';
+    sel.innerHTML = '<option value="oval">Cara (natural)</option><option value="hair">Cara + pelo (cabezón)</option>';
     sel.value = f.mode;
     sel.onchange = async () => { f.mode = sel.value; if (f.file) await applyPhoto(f, f.file); };
     acts.append(tg, ph, sel);
@@ -258,8 +260,8 @@ async function applyPhoto(f, file) {
 }
 
 // ---------- Paso 3: editor ----------
-const sliders = { scale: 's_scale', dx: 's_dx', dy: 's_dy', rot: 's_rot', opacity: 's_op', smooth: 's_smooth' };
-const outs = { scale: 'o_scale', dx: 'o_dx', dy: 'o_dy', rot: 'o_rot', opacity: 'o_op', smooth: 'o_smooth' };
+const sliders = { scale: 's_scale', dx: 's_dx', dy: 's_dy', rot: 's_rot', opacity: 's_op', feather: 's_feather', smooth: 's_smooth' };
+const outs = { scale: 'o_scale', dx: 'o_dx', dy: 'o_dy', rot: 'o_rot', opacity: 'o_op', feather: 'o_feather', smooth: 'o_smooth' };
 function activeFaces() { return S.faces.filter((f) => f.enabled && f.cutout); }
 function selFace() { const f = S.faces[S.sel]; return f && f.enabled && f.cutout ? f : activeFaces()[0]; }
 
@@ -279,7 +281,7 @@ function refreshEditor() {
     });
   }
   for (const k in sliders) $(sliders[k]).value = cur.adj[k];
-  $('c_flip').checked = cur.adj.flip; $('c_turn').checked = cur.adj.turn;
+  $('c_color').checked = cur.adj.color; $('c_fore').checked = cur.adj.fore;
   updateOutputs();
   drawStage();
 }
@@ -291,6 +293,7 @@ function updateOutputs() {
   $(outs.rot).textContent = f.adj.rot + '°';
   $(outs.opacity).textContent = Math.round(f.adj.opacity * 100) + '%';
   $(outs.smooth).textContent = Math.round(f.adj.smooth * 100) + '%';
+  $(outs.feather).textContent = Math.round(f.adj.feather * 100) + '%';
 }
 for (const k in sliders) {
   $(sliders[k]).addEventListener('input', (e) => {
@@ -300,8 +303,8 @@ for (const k in sliders) {
     updateOutputs(); if (video.paused) drawStage();
   });
 }
-$('c_flip').addEventListener('change', (e) => { const f = selFace(); if (f) { f.adj.flip = e.target.checked; drawStage(); } });
-$('c_turn').addEventListener('change', (e) => { const f = selFace(); if (f) { f.adj.turn = e.target.checked; drawStage(); } });
+$('c_color').addEventListener('change', (e) => { const f = selFace(); if (f) { f.adj.color = e.target.checked; drawStage(); } });
+$('c_fore').addEventListener('change', (e) => { const f = selFace(); if (f) { f.adj.fore = e.target.checked; drawStage(); } });
 $('resetBtn').addEventListener('click', () => { const f = selFace(); if (!f) return; f.adj = defaultAdj(); buildPath(f.track, f.adj.smooth); refreshEditor(); });
 
 // Arrastrar la cara con el dedo.
@@ -335,27 +338,54 @@ const endDrag = () => { drag = null; };
 stage.addEventListener('pointerup', endDrag); stage.addEventListener('pointercancel', endDrag);
 
 // Dibuja un cuadro: video + caras pegadas. "t" es el tiempo EXACTO del cuadro dibujado.
+// Modo "cara": la foto se deforma con la malla facial (ojos, nariz y boca caen sobre los del video).
+// Modo "pelo": la cara recortada con pelo se alinea por ojos, nariz y boca (efecto cabezón).
+let faceGL = null, glFailed = false;
+function getGL() {
+  if (faceGL || glFailed) return faceGL;
+  try { faceGL = new FaceGL(); } catch (e) { console.warn('[angelo] WebGL2 no disponible', e); glFailed = true; }
+  return faceGL;
+}
+const PROC = [...SIM, 61, 291];
+function targetPoints(p, f, W, H) {
+  const a = f.adj, unit = p.h * H;
+  const sim = { x: p.sim.x * H, y: p.sim.y * H, s: p.sim.s * H, r: p.sim.r };
+  return compose(sim, p.L, a.scale, (a.rot * Math.PI) / 180, a.dx * unit, a.dy * unit);
+}
+function drawSticker(ctx, f, pts, alpha) {
+  // Alineación por mínimos cuadrados (Procrustes) de ojos+nariz+boca.
+  const c = f.cutout, S = c.srcPts;
+  let msx = 0, msy = 0, mtx = 0, mty = 0;
+  for (const i of PROC) { msx += S[2 * i]; msy += S[2 * i + 1]; mtx += pts[2 * i]; mty += pts[2 * i + 1]; }
+  const n = PROC.length; msx /= n; msy /= n; mtx /= n; mty /= n;
+  let A = 0, B = 0, Q = 0;
+  for (const i of PROC) {
+    const sx = S[2 * i] - msx, sy = S[2 * i + 1] - msy, tx = pts[2 * i] - mtx, ty = pts[2 * i + 1] - mty;
+    A += sx * tx + sy * ty; B += sx * ty - sy * tx; Q += sx * sx + sy * sy;
+  }
+  const sc = Math.hypot(A, B) / Math.max(1e-6, Q), rot = Math.atan2(B, A);
+  ctx.save();
+  ctx.globalAlpha = f.adj.opacity * alpha;
+  ctx.translate(mtx, mty); ctx.rotate(rot); ctx.scale(sc, sc); ctx.translate(-msx, -msy);
+  ctx.drawImage(c.canvas, 0, 0);
+  ctx.restore();
+}
 function renderFrame(ctx, W, H, t) {
   ctx.drawImage(video, 0, 0, W, H);
+  const items = [], stickers = [];
   for (const f of activeFaces()) {
     const p = poseAt(f.track, t);
-    if (!p || p.alpha <= 0) continue;
-    const c = f.cutout, a = f.adj;
-    const unit = p.h * H; // frente→nariz en píxeles
-    const sc = (unit / c.faceH) * a.scale;
-    let sx = 1;
-    if (a.turn) { // simula el giro de la cabeza estrechando la cara
-      const ratioT = p.w / p.h, ratioC = c.faceW / c.faceH;
-      sx = Math.max(0.55, Math.min(1.15, ratioT / ratioC));
-    }
-    ctx.save();
-    ctx.globalAlpha = a.opacity * p.alpha;
-    ctx.translate(p.cx * W + a.dx * unit * FACE_UNIT, p.cy * H + a.dy * unit * FACE_UNIT);
-    ctx.rotate(p.roll - (a.flip ? -c.roll : c.roll) + (a.rot * Math.PI) / 180);
-    ctx.scale(sc * sx * (a.flip ? -1 : 1), sc);
-    ctx.drawImage(c.canvas, -c.ax, -c.ay);
-    ctx.restore();
+    if (!p || p.alpha <= 0 || !p.sim || !p.L) continue;
+    const pts = targetPoints(p, f, W, H);
+    if (f.cutout.mode === 'hair' || !getGL()) stickers.push([f, pts, p.alpha]);
+    else items.push({ cut: f.cutout, pts, opacity: f.adj.opacity * p.alpha, feather: f.adj.feather,
+      fore: f.adj.fore ? 1 : 0, color: f.adj.color ? 0.9 : 0, tgtStats: p.col, bias: 0.4 });
   }
+  if (items.length) {
+    try { ctx.drawImage(faceGL.render(W, H, items), 0, 0); }
+    catch (e) { console.warn(e); glFailed = true; faceGL = null; }
+  }
+  for (const [f, pts, al] of stickers) drawSticker(ctx, f, pts, al);
 }
 let frameT = 0; // tiempo del último cuadro presentado (mediaTime)
 function drawStage(t) {

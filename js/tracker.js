@@ -1,7 +1,7 @@
 // Analiza el video CUADRO POR CUADRO, sigue cada cara y guarda su pose
 // con el tiempo exacto del cuadro (mediaTime) para pegar la cara sin retraso.
 import { newVideoDetector, getLandmarker } from './vision.js';
-import { faceMetrics } from './geometry.js';
+import { faceMetrics, NPTS, simOf, localShape, skinStats } from './geometry.js';
 import { makeCanvas } from './cutout.js';
 
 const MAX_SAMPLE_FPS = 30;  // analiza hasta 30 cuadros por segundo (todos en videos de 24/25/30)
@@ -9,7 +9,7 @@ const GAP_SPLIT = 0.25;     // s: huecos más largos no se interpolan (se predic
 const PREDICT = 0.12;       // s: si se pierde la cara, sigue su movimiento este tiempo
 const HOLD_OUT = 0.35;      // s: luego la mantiene quieta y la desvanece
 const HOLD_IN = 0.06;       // s: aparece un poquito antes de la primera detección
-export const FACE_UNIT = 2.2; // tamaño de "una cara" respecto a la medida frente→nariz
+export const FACE_UNIT = 1; // h ya es el alto completo de la cara (frente→barbilla)
 
 const hasVFC = typeof HTMLVideoElement !== 'undefined' && 'requestVideoFrameCallback' in HTMLVideoElement.prototype;
 
@@ -89,6 +89,7 @@ function mergeTracks(tracks, asp) {
         }
         A.samples = [...mapA.values()].sort((p, q) => p.t - q.t);
         if (B.thumbH > A.thumbH) { A.thumb = B.thumb; A.thumbH = B.thumbH; }
+        B.mergedInto = A;
         tracks.splice(j, 1);
         changed = true;
         break outer;
@@ -126,8 +127,31 @@ export async function analyzeVideo(video, end, onProgress, isCancelled = () => f
   const seen = new Set();
   const n = Math.max(1, Math.floor(end / step));
 
-  const toDet = (m, t) => ({ t, cx: m.cx / aw, cy: m.cy / ah, h: m.fh / ah, w: m.fw / ah, roll: m.roll,
-    box: { x: m.box.x / aw, y: m.box.y / ah, w: m.box.w / aw, h: m.box.h / ah } });
+  const SC = 96; // lienzo pequeño para medir el color de la piel
+  const scv = makeCanvas(SC, SC);
+  const scg = scv.getContext('2d', { willReadFrequently: true });
+  // lm: puntos normalizados (0..1) respecto al cuadro analizado.
+  const toDet = (lm, t) => {
+    const m = faceMetrics(lm, aw, ah);
+    const pts = new Float32Array(NPTS * 2);
+    for (let i = 0; i < NPTS; i++) { pts[2 * i] = lm[i].x * asp; pts[2 * i + 1] = lm[i].y; }
+    const sim = simOf(pts);
+    const d = { t, cx: sim.x / asp, cy: sim.y,
+      h: Math.hypot(pts[20] - pts[304], pts[21] - pts[305]), w: m.fw / ah, roll: sim.r,
+      box: { x: m.box.x / aw, y: m.box.y / ah, w: m.box.w / aw, h: m.box.h / ah },
+      sim, L: localShape(pts, sim), col: null };
+    // Color de la piel de esta cara en este cuadro.
+    try {
+      const bx = m.box.x - m.box.w * 0.05, by = m.box.y - m.box.h * 0.05, bw = m.box.w * 1.1, bh = m.box.h * 1.1;
+      scg.clearRect(0, 0, SC, SC);
+      scg.drawImage(ac, bx, by, bw, bh, 0, 0, SC, SC);
+      const data = scg.getImageData(0, 0, SC, SC).data;
+      const sp = new Float32Array(NPTS * 2);
+      for (let i = 0; i < NPTS; i++) { sp[2 * i] = (lm[i].x * aw - bx) / bw * SC; sp[2 * i + 1] = (lm[i].y * ah - by) / bh * SC; }
+      d.col = skinStats(data, SC, SC, sp, 1);
+    } catch (_) {}
+    return d;
+  };
 
   let lastTs = 0;
   for (let k = 0; k <= n; k++) {
@@ -165,24 +189,24 @@ export async function analyzeVideo(video, end, onProgress, isCancelled = () => f
       }
       if (bestL && bd < 0.3) {
         const mapped = bestL.map((p) => ({ x: (x0 + p.x * size) / aw, y: (y0 + p.y * size) / ah, z: p.z }));
-        const dd = toDet(faceMetrics(mapped, aw, ah), t);
-        if (b.keypoints && b.keypoints.length >= 3) dd.kc = kpCentre(b.keypoints);
+        const dd = toDet(mapped, t);
+        if (b.keypoints && b.keypoints.length >= 3) { dd.kc = kpCentre(b.keypoints); dd.bh = bb.height / ah; }
         dets.push(dd);
       } else if (b.keypoints && b.keypoints.length >= 3) {
         const k0 = b.keypoints[0], k1 = b.keypoints[1], k2 = b.keypoints[2];
         const roll = Math.atan2((k1.y - k0.y) * ah, (k1.x - k0.x) * aw);
         const kc = kpCentre(b.keypoints);
-        dets.push({ t, kc, cx: kc.x, cy: kc.y, h: (bb.height * 0.48) / ah, w: (bb.width * 0.95) / ah, roll,
+        dets.push({ t, kc, bh: bb.height / ah, cx: kc.x, cy: kc.y, h: (bb.height * 0.48) / ah, w: (bb.width * 0.95) / ah, roll,
           box: { x: bb.originX / aw, y: bb.originY / ah, w: bb.width / aw, h: bb.height / ah }, rough: true });
       }
     }
     if (!boxes.length) {
       try {
         const r2 = lmImg.detect(ac);
-        for (const L of r2.faceLandmarks || []) dets.push(toDet(faceMetrics(L, aw, ah), t));
+        for (const L of r2.faceLandmarks || []) dets.push(toDet(L, t));
       } catch (e) { console.warn(e); }
     }
-    dets = dets.filter((d, i) => !dets.some((o, j) => j < i && Math.hypot((d.cx - o.cx) * asp, d.cy - o.cy) < Math.max(d.h, o.h) * 1.8));
+    dets = dets.filter((d, i) => !dets.some((o, j) => j < i && Math.hypot((d.cx - o.cx) * asp, d.cy - o.cy) < Math.max(d.h, o.h) * 0.8));
 
     // Asociación: predice dónde debería estar cada cara (con su velocidad) y empareja por cercanía.
     const pairs = [];
@@ -211,7 +235,7 @@ export async function analyzeVideo(video, end, onProgress, isCancelled = () => f
       tr.samples.push(d); tr.last = d; ids.push(tr.id);
       if (!d.rough && d.h > tr.thumbH) {
         tr.thumbH = d.h;
-        const sz = d.h * ah * FACE_UNIT * 1.5;
+        const sz = d.h * ah * 1.4;
         const tc = tr.thumb || (tr.thumb = makeCanvas(96, 96));
         const tg = tc.getContext('2d');
         tg.clearRect(0, 0, 96, 96);
@@ -232,39 +256,42 @@ export async function analyzeVideo(video, end, onProgress, isCancelled = () => f
     if (k % 4 === 0) await new Promise((r) => setTimeout(r, 0));
   }
   try { det.close(); } catch (_) {}
-  PERF.frames = frames.length; console.log('[angelo] perf', JSON.stringify(PERF));
+  PERF.frames = frames.length;
 
   // Detecciones "aproximadas" (sin puntos finos, p. ej. con la mano en la cara):
   // se calibran con la detección fina más cercana para que no salte; si hay una fina muy cerca, se descartan.
   for (const tr of tracks) {
     const fine = tr.samples.filter((x) => !x.rough && x.kc);
-    if (!fine.length) continue;
+    if (!fine.length) { tr.samples = tr.samples.filter((x) => !x.rough); continue; }
     tr.samples = tr.samples.filter((x) => {
       if (!x.rough) return true;
       let nf = null, nd = Infinity;
       for (const f of fine) { const d = Math.abs(f.t - x.t); if (d < nd) { nd = d; nf = f; } }
       if (nd < 0.1) return false;
-      x.cx = x.kc.x + (nf.cx - nf.kc.x) ; x.cy = x.kc.y + (nf.cy - nf.kc.y);
-      x.h = nf.h; x.w = nf.w;
+      x.cx = x.kc.x + (nf.cx - nf.kc.x); x.cy = x.kc.y + (nf.cy - nf.kc.y);
+      const k = x.bh && nf.bh ? x.bh / nf.bh : 1;
+      x.h = nf.h * k; x.w = nf.w * k;
+      x.sim = { x: x.cx * asp, y: x.cy, s: nf.sim.s * k, r: x.roll };
+      x.L = nf.L; x.col = nf.col;
       return true;
     });
   }
-  // Une pistas que en realidad son la misma cara (duplicadas o cortadas un momento).
+  const byOrig = new Map(tracks.map((tr) => [tr.id, tr]));
+  // Quita pistas vacías y une pistas que en realidad son la misma cara.
+  for (let i = tracks.length - 1; i >= 0; i--) if (!tracks[i].samples.length) tracks.splice(i, 1);
   mergeTracks(tracks, asp);
-  for (const tr of tracks) tr.id = tracks.indexOf(tr);
   const maxN = tracks.reduce((m, tr) => Math.max(m, tr.samples.length), 0);
   const minN = Math.max(4, Math.min(Math.round(1 / step), maxN * 0.2));
   let good = tracks.filter((tr) => tr.samples.length >= minN && tr.samples.some((x) => !x.rough));
   good.sort((a, b) => b.samples.length - a.samples.length);
   good = good.slice(0, 6);
-  const keep = new Set(good.map((t) => t.id));
+  const keep = new Set(good);
+  const resolve = (id) => { let tr = byOrig.get(id); while (tr && tr.mergedInto) tr = tr.mergedInto; return tr; };
   let bestT = 0, bestScore = -1;
   for (const f of frames) {
-    const ids = f.ids.filter((id) => keep.has(id));
-    const size = ids.reduce((acc, id) => {
-      const sm = tracks[id].samples.find((x) => x.t === f.t); return acc + (sm ? sm.h : 0);
-    }, 0);
-    const score = ids.length * 10 + size;
+    const trs = [...new Set(f.ids.map(resolve))].filter((tr) => tr && keep.has(tr));
+    const size = trs.reduce((acc, tr) => { const sm = tr.samples.find((x) => x.t === f.t); return acc + (sm ? sm.h : 0); }, 0);
+    const score = trs.length * 10 + size;
     if (score > bestScore) { bestScore = score; bestT = f.t; }
   }
   good.forEach((tr, i) => { tr.num = i + 1; });
@@ -273,8 +300,18 @@ export async function analyzeVideo(video, end, onProgress, isCancelled = () => f
 
 // Suavizado ADAPTATIVO centrado: quita el temblor cuando la cara está casi quieta,
 // y casi no suaviza cuando se mueve rápido (así no se queda atrás).
+// La posición/tamaño/giro (similitud) y la forma de la cara se suavizan por separado.
+function gauss(seg, i, sigma, get) {
+  const s = seg[i]; let W = 0, acc = 0;
+  for (let j = Math.max(0, i - 15); j < Math.min(seg.length, i + 16); j++) {
+    const dt = seg[j].t - s.t; if (Math.abs(dt) > sigma * 3) continue;
+    const w = Math.exp(-(dt * dt) / (2 * sigma * sigma)); W += w; acc += get(j) * w;
+  }
+  return acc / W;
+}
 export function buildPath(track, smooth = 0.2) {
   const sigmaMax = 0.004 + smooth * 0.09; // s
+  const sigShape = 0.01 + smooth * 0.1;   // s (la forma tiembla más en caras pequeñas)
   const segs = [];
   let cur = [];
   for (const s of track.samples) {
@@ -290,36 +327,54 @@ export function buildPath(track, smooth = 0.2) {
   track.path = segs.map((seg) => {
     const rolls = []; let prev = null;
     for (const s of seg) {
-      let r = s.roll;
+      let r = s.sim ? s.sim.r : s.roll;
       if (prev !== null) { while (r - prev > Math.PI) r -= 2 * Math.PI; while (r - prev < -Math.PI) r += 2 * Math.PI; }
       rolls.push(r); prev = r;
     }
-    // Velocidad local (en caras por segundo).
     const speed = seg.map((s, i) => {
       const a = seg[Math.max(0, i - 1)], b = seg[Math.min(seg.length - 1, i + 1)];
       const dt = b.t - a.t; if (dt <= 0) return 0;
       return Math.hypot(b.cx - a.cx, b.cy - a.cy) / dt / Math.max(1e-3, s.h * FACE_UNIT);
     });
+    const N = seg[0].L ? seg[0].L.length : 0;
     return seg.map((s, i) => {
       const sigma = sigmaMax / (1 + speed[i] * 1.5);
-      if (sigma < 0.006) return { t: s.t, cx: s.cx, cy: s.cy, h: s.h, w: s.w, roll: rolls[i] };
-      let W = 0, cx = 0, cy = 0, h = 0, w = 0, roll = 0;
-      for (let j = Math.max(0, i - 12); j < Math.min(seg.length, i + 13); j++) {
-        const dt = seg[j].t - s.t;
-        if (Math.abs(dt) > sigma * 3) continue;
-        const wt = Math.exp(-(dt * dt) / (2 * sigma * sigma));
-        W += wt; cx += seg[j].cx * wt; cy += seg[j].cy * wt; h += seg[j].h * wt; w += seg[j].w * wt; roll += rolls[j] * wt;
+      const g = (get) => (sigma < 0.006 ? get(i) : gauss(seg, i, sigma, get));
+      const out = { t: s.t, cx: g((j) => seg[j].cx), cy: g((j) => seg[j].cy), h: g((j) => seg[j].h), w: g((j) => seg[j].w), roll: g((j) => rolls[j]) };
+      if (s.sim) {
+        out.sim = { x: g((j) => seg[j].sim.x), y: g((j) => seg[j].sim.y), s: g((j) => seg[j].sim.s), r: out.roll };
+        // Forma: promedio gaussiano (fijo) de los puntos locales.
+        const L = new Float32Array(N); let W = 0;
+        for (let j = Math.max(0, i - 15); j < Math.min(seg.length, i + 16); j++) {
+          const dt = seg[j].t - s.t; if (Math.abs(dt) > sigShape * 3 || !seg[j].L) continue;
+          const w = Math.exp(-(dt * dt) / (2 * sigShape * sigShape)); W += w;
+          const Lj = seg[j].L; for (let k = 0; k < N; k++) L[k] += Lj[k] * w;
+        }
+        for (let k = 0; k < N; k++) L[k] /= W;
+        out.L = L;
+        // Color: cambia despacio (luz), promedio largo.
+        let cw = 0; const col = [0, 0, 0, 0, 0, 0];
+        for (let j = Math.max(0, i - 15); j < Math.min(seg.length, i + 16); j++) {
+          if (!seg[j].col) continue; cw++; for (let k = 0; k < 6; k++) col[k] += seg[j].col[k];
+        }
+        out.col = cw ? col.map((v) => v / cw) : null;
       }
-      return { t: s.t, cx: cx / W, cy: cy / W, h: h / W, w: w / W, roll: roll / W };
+      return out;
     });
   });
 }
 
 function velocity(seg, fromEnd) {
-  if (seg.length < 2) return { x: 0, y: 0, h: 0, r: 0 };
+  if (seg.length < 2) return { x: 0, y: 0, h: 0, r: 0, sx: 0, sy: 0 };
   const a = fromEnd ? seg[seg.length - 2] : seg[0], b = fromEnd ? seg[seg.length - 1] : seg[1];
-  const dt = b.t - a.t; if (dt <= 0) return { x: 0, y: 0, h: 0, r: 0 };
-  return { x: (b.cx - a.cx) / dt, y: (b.cy - a.cy) / dt, h: (b.h - a.h) / dt, r: (b.roll - a.roll) / dt };
+  const dt = b.t - a.t; if (dt <= 0) return { x: 0, y: 0, h: 0, r: 0, sx: 0, sy: 0 };
+  return { x: (b.cx - a.cx) / dt, y: (b.cy - a.cy) / dt, h: (b.h - a.h) / dt, r: (b.roll - a.roll) / dt,
+    sx: a.sim && b.sim ? (b.sim.x - a.sim.x) / dt : 0, sy: a.sim && b.sim ? (b.sim.y - a.sim.y) / dt : 0 };
+}
+function shifted(p, v, dt, alpha) {
+  const o = { t: p.t + dt, cx: p.cx + v.x * dt, cy: p.cy + v.y * dt, h: p.h, w: p.w, roll: p.roll, alpha, L: p.L, col: p.col };
+  if (p.sim) o.sim = { x: p.sim.x + v.sx * dt, y: p.sim.y + v.sy * dt, s: p.sim.s, r: p.sim.r };
+  return o;
 }
 
 export function poseAt(track, t) {
@@ -327,23 +382,27 @@ export function poseAt(track, t) {
   for (const seg of track.path) {
     const a = seg[0], z = seg[seg.length - 1];
     if (t < a.t - HOLD_IN || t > z.t + HOLD_OUT) continue;
-    if (t <= a.t) {
-      const v = velocity(seg, false), dt = t - a.t; // dt <= 0: proyecta hacia atrás
-      return { t, cx: a.cx + v.x * dt, cy: a.cy + v.y * dt, h: a.h, w: a.w, roll: a.roll, alpha: 1 };
-    }
+    if (t <= a.t) return shifted(a, velocity(seg, false), t - a.t, 1);
     if (t >= z.t) {
       // Se perdió la cara: sigue su movimiento un instante y luego la mantiene y desvanece.
-      const v = velocity(seg, true);
       const pdt = Math.min(t - z.t, PREDICT);
       const fade = t - z.t <= PREDICT ? 1 : Math.max(0, 1 - (t - z.t - PREDICT) / (HOLD_OUT - PREDICT));
-      return { t, cx: z.cx + v.x * pdt, cy: z.cy + v.y * pdt, h: Math.max(z.h * 0.5, z.h + v.h * pdt), w: z.w, roll: z.roll + v.r * pdt, alpha: fade };
+      return shifted(z, velocity(seg, true), pdt, fade);
     }
     let lo = 0, hi = seg.length - 1;
     while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (seg[mid].t <= t) lo = mid; else hi = mid; }
     const p = seg[lo], q = seg[hi];
     const u = (t - p.t) / Math.max(1e-6, q.t - p.t);
-    const L = (x, y) => x + (y - x) * u;
-    return { t, cx: L(p.cx, q.cx), cy: L(p.cy, q.cy), h: L(p.h, q.h), w: L(p.w, q.w), roll: L(p.roll, q.roll), alpha: 1 };
+    const Lr = (x, y) => x + (y - x) * u;
+    const o = { t, cx: Lr(p.cx, q.cx), cy: Lr(p.cy, q.cy), h: Lr(p.h, q.h), w: Lr(p.w, q.w), roll: Lr(p.roll, q.roll), alpha: 1 };
+    if (p.sim && q.sim) {
+      o.sim = { x: Lr(p.sim.x, q.sim.x), y: Lr(p.sim.y, q.sim.y), s: Lr(p.sim.s, q.sim.s), r: Lr(p.sim.r, q.sim.r) };
+      const N = p.L.length, L = new Float32Array(N);
+      for (let k = 0; k < N; k++) L[k] = p.L[k] + (q.L[k] - p.L[k]) * u;
+      o.L = L;
+      o.col = p.col && q.col ? p.col.map((v, k) => v + (q.col[k] - v) * u) : (p.col || q.col);
+    }
+    return o;
   }
   return null;
 }

@@ -23,3 +23,15 @@ Pon cualquier cara en cualquier video, desde el teléfono. Gratis, sin anuncios 
 - PWA instalable (manifest + service worker).
 
 Instalar en iPhone: abre el enlace en Safari → Compartir → **Agregar a pantalla de inicio**.
+
+## Calidad de la cara (v5)
+
+- **Malla 3D, no calcomanía:** la foto se deforma con los 468 puntos de MediaPipe (852 triángulos, WebGL2) para que ojos, nariz y boca caigan sobre los del video. Sigue cabezas inclinadas o mirando abajo y nunca es más grande que la cara real.
+- **Borde suave** que sigue el contorno de la cara del video (slider "Borde suave").
+- **Igualar color**: transferencia de color en espacio Lab (media y desviación) entre la piel de la foto y la del video.
+- **Ocultar frente/pelo de la foto**: se desvanece la frente y se recorta el pelo con el segmentador, para que no aparezca un flequillo ajeno.
+- Se suaviza la foto (mipmaps) para igualar la nitidez del video.
+- El modo "Cara + pelo (cabezón)" mantiene la calcomanía grande alineada por mínimos cuadrados.
+- Sin WebGL2 se usa la calcomanía como respaldo.
+
+Comparación: `screenshots/calidad-antes-despues.jpg`.
